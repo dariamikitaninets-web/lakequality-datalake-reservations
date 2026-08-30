@@ -1,0 +1,107 @@
+name: Data quality gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pipeline_mode:
+        description: "fixed = green quality gate; buggy = controlled latest-wins failure"
+        required: true
+        default: fixed
+        type: choice
+        options:
+          - fixed
+          - buggy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lakequality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  data-quality:
+    name: Integration and data quality tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LAKEQUALITY_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.pipeline_mode || 'fixed' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Generate synthetic source data
+        run: python -m src.generate_data --rows 1000
+
+      - name: Run Datalake pipeline
+        run: python -m src.pipeline --mode "$LAKEQUALITY_MODE"
+
+      - name: Run automated quality gate
+        run: |
+          mkdir -p reports
+          python -m pytest \
+            --junitxml=reports/junit.xml \
+            --html=reports/pytest-report.html \
+            --self-contained-html
+
+      - name: Upload quality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-quality-${{ env.LAKEQUALITY_MODE }}-${{ github.run_number }}
+          path: |
+            reports/junit.xml
+            reports/pytest-report.html
+          if-no-files-found: warn
+          retention-days: 14
+
+  performance:
+    name: Batch performance baseline
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.pipeline_mode == 'fixed' }}
+    needs: data-quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Generate performance dataset
+        run: python -m src.generate_data --rows 100000
+
+      - name: Measure fixed pipeline runtime
+        run: |
+          mkdir -p reports
+          python -c 'import subprocess, sys, time; start = time.perf_counter(); subprocess.run([sys.executable, "-m", "src.pipeline", "--mode", "fixed"], check=True); elapsed = time.perf_counter() - start; print(f"rows=100000\nmode=fixed\nelapsed_seconds={elapsed:.3f}\nthreshold_seconds=30.000\nnote=laboratory baseline, not a client SLA"); sys.exit(0 if elapsed <= 30 else 1)' | tee reports/performance.txt
+
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-baseline-${{ github.run_number }}
+          path: reports/performance.txt
+          if-no-files-found: warn
+          retention-days: 14

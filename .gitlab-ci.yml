@@ -1,0 +1,71 @@
+# Proposition de pipeline GitLab CI pour la mission simulee.
+# Ce fichier est fourni comme extension demonstrative : le laboratoire personnel
+# est execute sur GitHub Actions, car GitHub est la plateforme disponible.
+
+stages:
+  - quality
+  - performance
+  - demonstration
+
+default:
+  image: python:3.14-slim
+  before_script:
+    - python -m pip install --disable-pip-version-check -r requirements.txt
+    - mkdir -p reports
+  cache:
+    key: pip-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .cache/pip/
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+quality_gate:
+  stage: quality
+  variables:
+    LAKEQUALITY_MODE: fixed
+  script:
+    - python -m src.generate_data --rows 1000
+    - python -m src.pipeline --mode fixed
+    - python -m pytest --junitxml=reports/junit.xml --html=reports/pytest-report.html --self-contained-html
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - reports/junit.xml
+      - reports/pytest-report.html
+    reports:
+      junit: reports/junit.xml
+
+performance_baseline:
+  stage: performance
+  needs:
+    - quality_gate
+  script:
+    - python -m src.generate_data --rows 100000
+    - >-
+      python -c 'import subprocess, sys, time; start = time.perf_counter(); subprocess.run([sys.executable, "-m", "src.pipeline", "--mode", "fixed"], check=True); elapsed = time.perf_counter() - start; print(f"rows=100000\nmode=fixed\nelapsed_seconds={elapsed:.3f}\nthreshold_seconds=30.000\nnote=laboratory baseline, not a client SLA"); sys.exit(0 if elapsed <= 30 else 1)' | tee reports/performance.txt
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - reports/performance.txt
+
+controlled_bug_demo:
+  stage: demonstration
+  when: manual
+  allow_failure: true
+  variables:
+    LAKEQUALITY_MODE: buggy
+  script:
+    - python -m src.generate_data --rows 1000
+    - python -m src.pipeline --mode buggy
+    - python -m pytest --junitxml=reports/junit-buggy.xml --html=reports/pytest-report-buggy.html --self-contained-html
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - reports/junit-buggy.xml
+      - reports/pytest-report-buggy.html
+    reports:
+      junit: reports/junit-buggy.xml
